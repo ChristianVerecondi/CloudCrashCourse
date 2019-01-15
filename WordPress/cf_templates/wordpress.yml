@@ -1,0 +1,286 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This template creates a wordpress simple wordpress site.
+Parameters:
+    VpcId:
+        Type: AWS::EC2::VPC::Id
+        Description: VPC ID to build the stack in
+        ConstraintDescription: Must be the VPC Id of an existing VPC in this account
+        Default: vpc-361e4251
+    Subnets:
+        Type: CommaDelimitedList
+        Description: The list of subnet IDs in above VPC
+        ConstraintDescription: must be a list of at least two existing subnets associated with     at least two different availability zones
+        Default: subnet-78c0f631,subnet-1ea7a279
+    DBUser:
+        Description: The WordPress database admin account username
+        Type: String
+        Default: admin
+    DBPassword:
+        NoEcho: true
+        Description: The WordPress database admin account password
+        Type: String
+        MinLength: 8
+        MaxLength: 41
+        AllowedPattern: '[a-zA-Z0-9]*'
+        ConstraintDescription: Must contain only alphanumeric characters
+        Default: dbpassword1234
+    DBClass:
+        Description: Database instance class
+        Type: String
+        AllowedValues:
+            - db.t1.micro
+            - db.m1.small
+            - db.m1.medium
+            - db.m1.large
+            - db.t2.small
+        Default: db.t2.small
+        ConstraintDescription: Must select a valid database instance type
+    DBAllocatedStorage:
+        Description: The size of the database (Gb)
+        Type: Number
+        MinValue: 5
+        MaxValue: 1024
+        ConstraintDescription: Must be between 5 and 1024Gb
+        Default: 5
+    DBName:
+        Description: The WordPress database name
+        Type: String
+        MinLength: 4
+        MaxLength: 64
+        AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+        ConstraintDescription: Must begin with a letter and contain only alphanumeric characters
+        Default: wordpressdb
+    InstanceType:
+        Type: String
+        Description: EC2 instance type to be used as application servers
+        AllowedValues:
+            - t2.micro
+            - t2.small
+        Default: t2.micro
+        ConstraintDescription: Must be a valid EC2 instance type from the list above
+    ImageId:
+        Type: String
+        Description: AMI to be used for building the application servers
+        ConstraintDescription: must be a valid AMI ID
+        Default: ami-02fd0b06f06d93dfc
+    KeyName:
+        Type: AWS::EC2::KeyPair::KeyName
+        Description: The EC2 Key Pair to allow SSH access to application servers
+        ConstraintDescription: must be the name of an existing EC2 KeyPair
+        Default: demos
+    AppAsgMinSize:
+        Type: Number
+        Description: Min size of the application server ASG
+        Default: 1
+        ConstraintDescription: must be an integer
+    AppAsgDesiredCapacity:
+        Type: Number
+        Description: Desired size of the application server ASG
+        Default: 1
+        ConstraintDescription: must be an integer
+    AppAsgMaxSize:
+        Type: Number
+        Description: Max size of the application server ASG
+        Default: 2
+        ConstraintDescription: must be an integer
+    WordpressVersion:
+        Type: String
+        Description: Enter the version of Wordpress you'd like to install.
+        Default: 4.9.8
+Resources:
+    ElbSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupDescription: Security group for the ELB
+            VpcId: !Ref VpcId
+            SecurityGroupIngress:
+                - IpProtocol: tcp
+                  FromPort: 80
+                  ToPort: 80
+                  CidrIp: 0.0.0.0/0
+    AppServerSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupDescription: Security group for the ELB
+            VpcId: !Ref VpcId
+            SecurityGroupIngress:
+                - IpProtocol: tcp
+                  FromPort: 80
+                  ToPort: 80
+                  SourceSecurityGroupId: !Ref ElbSecurityGroup
+                # BAD BAD! added for debugging
+                - IpProtocol: tcp
+                  FromPort: 22
+                  ToPort: 22
+                  CidrIp: 0.0.0.0/0
+    MountTargetSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupDescription: Security group for mount target
+            VpcId: !Ref VpcId
+            SecurityGroupIngress:
+                - IpProtocol: tcp
+                  FromPort: 2049
+                  ToPort: 2049
+                  SourceSecurityGroupId: !Ref AppServerSecurityGroup
+    DBEC2SecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupDescription: Open database for access
+            VpcId: !Ref VpcId
+            SecurityGroupIngress:
+                - IpProtocol: tcp
+                  FromPort: 3306
+                  ToPort: 3306
+                  SourceSecurityGroupId: !Ref AppServerSecurityGroup
+    AppServerRole:
+        Type: AWS::IAM::Role
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                    -
+                        Effect: Allow
+                        Principal:
+                            Service:
+                                - ec2.amazonaws.com
+                        Action:
+                            - sts:AssumeRole
+            Path: /
+    AppServerRolePolicies:
+        Type: "AWS::IAM::Policy"
+        Properties:
+            PolicyName: "AppServerRolePolicy"
+            PolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                    -
+                        Effect: "Allow"
+                        Action:
+                            - elasticfilesystem:DescribeMountTargets
+                        Resource: "*"
+            Roles:
+                -
+                    Ref: "AppServerRole"
+    AppServerInstanceProfile:
+        Type: AWS::IAM::InstanceProfile
+        Properties:
+            Path: /
+            Roles:
+                - !Ref AppServerRole
+    DBSubnetGroup:
+        Type: AWS::RDS::DBSubnetGroup
+        Properties:
+            DBSubnetGroupDescription: DB subnet group for the DB instance
+            DBSubnetGroupName: !Join
+                - '-'
+                - - !Ref AWS::StackName
+                  - DBSubnetGroup
+            SubnetIds: !Ref Subnets
+    DBInstance:
+        Type: AWS::RDS::DBInstance
+        Properties:
+            DBName: !Ref DBName
+            Engine: MySQL
+            MultiAZ: false
+            MasterUsername: !Ref DBUser
+            MasterUserPassword: !Ref DBPassword
+            DBInstanceClass: !Ref DBClass
+            AllocatedStorage: !Ref DBAllocatedStorage
+            VPCSecurityGroups:
+                - !GetAtt DBEC2SecurityGroup.GroupId
+            DBSubnetGroupName: !Ref DBSubnetGroup
+    AppElb:
+        Type: AWS::ElasticLoadBalancing::LoadBalancer
+        Properties:
+            SecurityGroups:
+                - !Ref ElbSecurityGroup
+            Subnets: !Ref Subnets
+            Scheme: internet-facing
+            Listeners:
+                - LoadBalancerPort: 80
+                  Protocol: HTTP
+                  InstancePort: 80
+            HealthCheck:
+                Target: HTTP:80/wp-admin/install.php
+                HealthyThreshold: 3
+                UnhealthyThreshold: 5
+                Interval: 30
+                Timeout: 5
+    FileSystem:
+        Type: AWS::EFS::FileSystem
+        Properties:
+            PerformanceMode: generalPurpose
+            FileSystemTags:
+                - Key: Name
+                  Value: !Join
+                      - '-'
+                      - - !Ref AWS::StackName
+                        - FileSystem
+    MountTarget:
+        Type: AWS::EFS::MountTarget
+        Properties:
+            FileSystemId: !Ref FileSystem
+            SubnetId: !Select
+                - 0
+                - !Ref Subnets
+            SecurityGroups:
+                - !Ref MountTargetSecurityGroup
+    AppLc:
+        Type: AWS::AutoScaling::LaunchConfiguration
+        Properties:
+            KeyName: !Ref KeyName
+            IamInstanceProfile: !Ref AppServerInstanceProfile
+            ImageId: !Ref ImageId
+            SecurityGroups:
+                - !Ref AppServerSecurityGroup
+            InstanceType: !Ref InstanceType
+            AssociatePublicIpAddress: true
+            UserData:
+                Fn::Base64: !Sub |
+                    #!/bin/bash -x
+                    yum install -y php php-mysql mysql httpd jq
+                    cd /tmp
+                    wget https://github.com/WordPress/WordPress/archive/${WordpressVersion}.zip
+                    unzip ${WordpressVersion}.zip
+                    rm -rf /var/www/html/
+                    cp -r WordPress-${WordpressVersion} /var/www/html
+                    cp /var/www/html/wp-config-sample.php /var/www/html/wp-config.php
+                    cd /var/www/html/
+                    sed -i "s/'database_name_here'/'${DBName}'/g" wp-config.php
+                    sed -i "s/'username_here'/'${DBUser}'/g" wp-config.php
+                    sed -i "s/'password_here'/'${DBPassword}'/g" wp-config.php
+                    sed -i "s/'localhost'/'${DBInstance.Endpoint.Address}'/g" wp-config.php
+                    EFS=$(aws efs describe-mount-targets --file-system-id ${FileSystem} --region ${AWS::Region} | jq '.MountTargets[].IpAddress' | tr -d '"')
+                    mkdir /tmp/efs/
+                    mount -t nfs4 $EFS:/ /tmp/efs/
+                    rsync -rtv /var/www/html/wp-content/ /tmp/efs/
+                    umount /tmp/efs
+                    mount -t nfs4 $EFS:/ /var/www/html/wp-content/
+                    chown -R apache:root /var/www/html/
+                    chkconfig httpd --add
+                    /etc/init.d/httpd restart
+                    /opt/aws/bin/cfn-signal -e $? --stack '${AWS::StackName}' --region ${AWS::Region} --resource 'AppAsg'
+    AppAsg:
+        Type: AWS::AutoScaling::AutoScalingGroup
+        Properties:
+            VPCZoneIdentifier: !Ref Subnets
+            LaunchConfigurationName: !Ref AppLc
+            MinSize: !Ref AppAsgMinSize
+            DesiredCapacity: !Ref AppAsgDesiredCapacity
+            MaxSize: !Ref AppAsgMaxSize
+            LoadBalancerNames:
+                - !Ref AppElb
+            HealthCheckType: ELB
+            HealthCheckGracePeriod: 900
+        CreationPolicy:
+            ResourceSignal:
+                Count: !Ref AppAsgDesiredCapacity
+                Timeout: PT15M
+        UpdatePolicy:
+            AutoScalingReplacingUpdate:
+                WillReplace: true
+Outputs:
+    URL:
+        Description: URL to the application
+        Value: !GetAtt AppElb.DNSName
